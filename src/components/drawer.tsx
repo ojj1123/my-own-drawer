@@ -3,6 +3,7 @@ import { useDrag } from "@use-gesture/react";
 import { useCallback, useEffect, useState, PropsWithChildren, useRef } from "react";
 import { usePreventScroll } from "./use-prevent-scroll";
 
+const VELOCITY_THRESHOLD = 0.4;
 interface DrawerProps extends PropsWithChildren {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
@@ -34,7 +35,6 @@ const Drawer: React.FC<DrawerProps> = ({
   const [{ y }, api] = useSpring(() => ({ y: window.innerHeight }));
   const [isDragging, setIsDragging] = useState(false);
 
-  // Convert snap points from percentage to pixels
   const getSnapPoint = useCallback(
     (point: number) => {
       return containerHeight * (1 - point);
@@ -46,28 +46,63 @@ const Drawer: React.FC<DrawerProps> = ({
     isDisabled: !isOpen || isDragging,
   });
 
-  // Find the nearest snap point and handle thresholds
+  const closeDrawer = useCallback(() => {
+    api.start({
+      y: containerHeight,
+      immediate: false,
+      config: { ...config.stiff },
+    });
+
+    onOpenChange(false);
+
+    if (snapPoints) {
+      setActiveSnapPoint(snapPoints[0]);
+    }
+  }, [api, containerHeight, onOpenChange, snapPoints]);
+
   const findNextSnapPoint = useCallback(
-    (currentY: number, velocity: number, direction: number) => {
-      const nextSnapPointPixel = normalizedSnapPoints.reduce((prevSnapPoint, currentSnapPoint) => {
+    ({
+      currentY,
+      velocity,
+      direction,
+    }: {
+      currentY: number;
+      velocity: number;
+      direction: number;
+    }) => {
+      const dragDirection = direction > 0 ? "down" : "up";
+
+      if (velocity > 2 && dragDirection === "down") {
+        return null;
+      }
+
+      if (velocity > 2 && dragDirection === "up" && snapPoints) {
+        return snapPoints[snapPoints.length - 1];
+      }
+
+      const closestSnapPoint = normalizedSnapPoints.reduce((prevSnapPoint, currentSnapPoint) => {
         return Math.abs(currentSnapPoint - currentY) < Math.abs(prevSnapPoint - currentY)
           ? currentSnapPoint
           : prevSnapPoint;
       });
 
-      // 현재 스냅 포인트와 가장 가까운 스냅 포인트를 찾는다
-      const nextSnapPointIndex = normalizedSnapPoints.indexOf(nextSnapPointPixel);
-      const nextSnapPoint = snapPoints[nextSnapPointIndex];
+      const closestSnapPointIndex = normalizedSnapPoints.indexOf(closestSnapPoint);
 
-      const threshold = Math.abs(activeSnapPointPixel - nextSnapPointPixel) * 0.4;
+      const threshold = Math.abs(activeSnapPointPixel - closestSnapPoint) * 0.4;
       const deltaY = Math.abs(activeSnapPointPixel - currentY);
+      const isFirst = activeSnapPointIndex === 0;
+      const isLast = activeSnapPointIndex === snapPoints.length - 1;
 
-      if (direction > 0 && activeSnapPointIndex === 0) {
+      if (dragDirection === "up" && isLast) {
+        return snapPoints[snapPoints.length - 1];
+      }
+
+      if (dragDirection === "down" && isFirst) {
         return null;
       }
 
       if (deltaY > threshold) {
-        return nextSnapPoint;
+        return snapPoints[closestSnapPointIndex];
       }
 
       return activeSnapPoint;
@@ -87,49 +122,50 @@ const Drawer: React.FC<DrawerProps> = ({
     [api, getSnapPoint]
   );
 
-  const onRelease = useCallback(() => {
-    const visibleDrawerHeight = Math.min(
-      drawerRef.current?.getBoundingClientRect().height ?? 0,
-      window.innerHeight
-    );
-    const visibleDrawerWidth = Math.min(
-      drawerRef.current?.getBoundingClientRect().width ?? 0,
-      window.innerWidth
-    );
-  }, []);
-
-  const close = useCallback(
-    (velocity = 0) => {
-      onOpenChange(false);
-      api.start({
-        y: containerHeight,
-        immediate: false,
-        config: { ...config.stiff, velocity },
-      });
-    },
-    [api, containerHeight, onOpenChange]
-  );
-
   const onDrag = (y: number) => {
     setIsDragging(true);
     api.start({ y, immediate: true });
   };
 
   const bind = useDrag(
-    ({ offset: [, oy], movement: [, my], velocity: [, vy], last }) => {
+    ({ offset: [, offsetY], movement: [, movementY], velocity: [, velocityY], last }) => {
       if (last) {
-        const direction = my > 0 ? 1 : -1;
-        const nextSnapPoint = findNextSnapPoint(oy, vy, direction);
-
-        if (nextSnapPoint === null) {
-          close();
-        } else {
-          onOpenChange(true);
-          snapToPoint(nextSnapPoint);
-        }
         setIsDragging(false);
+
+        const direction = movementY > 0 ? 1 : -1;
+
+        if (snapPoints) {
+          const nextSnapPoint = findNextSnapPoint({
+            currentY: offsetY,
+            velocity: velocityY,
+            direction,
+          });
+
+          if (nextSnapPoint === null) {
+            closeDrawer();
+          } else {
+            onOpenChange(true);
+            snapToPoint(nextSnapPoint);
+          }
+          return;
+        }
+
+        if (direction > 0 && velocityY > VELOCITY_THRESHOLD) {
+          closeDrawer();
+          return;
+        }
+
+        const visibleDrawerHeight = Math.min(
+          drawerRef.current?.getBoundingClientRect().height ?? 0,
+          window.innerHeight
+        );
+
+        if (movementY >= visibleDrawerHeight * 0.25) {
+          closeDrawer();
+          return;
+        }
       } else {
-        onDrag(oy);
+        onDrag(offsetY);
       }
     },
     {
